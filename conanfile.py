@@ -7,7 +7,7 @@ import os
 required_conan_version = ">=1.50.0"
 
 
-class bxConan(ConanFile):
+class bgfxConan(ConanFile):
     name = "bgfx"
     license = "BSD-2-Clause"
     homepage = "https://github.com/bkaradzic/bgfx"
@@ -15,8 +15,8 @@ class bxConan(ConanFile):
     description = "Cross-platform, graphics API agnostic, \"Bring Your Own Engine/Framework\" style rendering library."
     topics = ("lib-static", "C++", "C++14", "rendering", "utility")
     settings = "os", "compiler", "arch", "build_type"
-    options = {"shared": [True, False]}
-    default_options = {"shared": False}
+    options = {"shared": [True, False], "tools": [True, False]}
+    default_options = {"shared": False, "tools": False}
 
     requires = "bx/[>=1.18.0]", "bimg/[>=1.3.0]"
 
@@ -45,15 +45,25 @@ class bxConan(ConanFile):
             if self.options.shared:
                 self.binExt.extend(["*.dll"]) # Windows dlls go in /bin
             self.libExt.extend(["*.pdb"])
-            self.packageLibExt = ""
+            self.packageLibPrefix = ""
             self.binFolder = "windows"
         elif self.settings.os == "Linux":
             self.libExt = ["*.a"]
+            self.binExt = []
             if self.options.shared:
                 self.libExt.extend(["*.so"]) # But Linux .so files go in /lib
-            self.packageLibExt = ".a"
+            self.packageLibPrefix = "lib"
             self.binFolder = "linux"
-        self.toolsFolder = cwd=os.path.sep.join([".", "tools", "bin", self.binFolder])
+        self.toolsFolder = os.path.sep.join([".", "tools", "bin", self.binFolder])
+
+        self.projs = ["bgfx"]
+        self.genieExtra = ""
+        if self.options.shared:
+            self.genieExtra += " --with-shared-lib"
+            self.projs.extend(["bgfx-shared-lib"])
+        if self.options.tools:
+            self.genieExtra += " --with-tools"
+            self.projs.extend(["shaderc"])
 
     def set_version(self):
         self.output.info("Setting version from git.")
@@ -84,25 +94,29 @@ class bxConan(ConanFile):
         genie = os.path.sep.join(["..", self.bxFolder, self.toolsFolder, "genie"])
         if self.settings.compiler == "Visual Studio":
             # Use genie directly, then msbuild on specific projects based on requirements
-            genieGen = f"vs{self.vsVerToGenie[str(self.settings.compiler.version)]}"
-            self.output.highlight(genieGen)
+            genieVS = f"vs{self.vsVerToGenie[str(self.settings.compiler.version)]}"
+            genieGen = f"{self.genieExtra} {genieVS}"
+
             self.run(f"{genie} {genieGen}", cwd=self.bgfxFolder)
+
+            # Build with MSBuild
             msbuild = MSBuild(self)
-            msbuild.build(f"{self.bgfxFolder}\\.build\\projects\\{genieGen}\\bgfx.vcxproj")
+            for proj in self.projs:
+                msbuild.build(f"{self.bgfxFolder}\\.build\\projects\\{genieVS}\\{proj}.vcxproj")
         else:
             # Not sure if XCode can be spefically handled by conan for building through, so assume everything not VS is make
             # Use genie with gmake gen, then make on specific projects based on requirements
             # gcc-multilib and g++-multilib required for 32bit cross-compilation, should see if we can check and install through conan
             
             # Generate projects through genie
-            genieGen = f"{self.gccOsToGenie[str(self.settings.os)]} gmake"
+            genieGen = f"{self.genieExtra} {self.gccOsToGenie[str(self.settings.os)]} gmake"
             self.run(f"{genie} {genieGen}", cwd=self.bgfxFolder)
 
             # Build project folder and path from given settings
             projFolder = f"gmake-{self.gmakeOsToProj[str(self.settings.os)]}"
             if self.osToUseArchConfigSuffix[str(self.settings.os)]:
                 projFolder += self.gmakeArchToGenieSuffix[str(self.settings.arch)]
-            projPath = os.path.sep.join([".", self.bxFolder, ".build", "projects", projFolder])
+            projPath = os.path.sep.join([".", self.bgfxFolder, ".build", "projects", projFolder])
 
             autotools = AutoToolsBuildEnvironment(self)
             with tools.environment_append(autotools.vars):
@@ -111,8 +125,9 @@ class bxConan(ConanFile):
                 if self.osToUseMakeConfigSuffix[str(self.settings.os)]:
                     conf += self.archToMakeConfigSuffix[str(self.settings.arch)]
 
-                # Compile with make
-                self.run(f"make {conf}", cwd=projPath)
+                # Build with make
+                for proj in self.projs:
+                    self.run(f"make {conf} {proj}", cwd=projPath)
 
     def package(self):
         # Copy includes
@@ -125,12 +140,20 @@ class bxConan(ConanFile):
         if len(self.libExt) > 1:
             for ind in range(1, len(self.libExt)):
                 self.copy(self.libExt[ind], dst="lib", src=f"{self.bgfxFolder}/.build/", keep_path=False)
-        for bgfxFile in Path(f"{self.package_folder}/lib").glob("*bgfx*"):
-            tools.rename(f"{self.package_folder}/lib/{bgfxFile.name}", f"{self.package_folder}/lib/bgfx{bgfxFile.suffix}")
+
+        for ind in range(0, len(self.binExt)):
+            self.copy(self.binExt[ind], dst="bin", src=f"{self.bgfxFolder}/.build/", keep_path=False)
+
+        for bgfxFile in Path(f"{self.package_folder}").rglob(f"*{str(self.settings.build_type)}*"):
+            strippedName = bgfxFile.name.replace(f"{str(self.settings.build_type)}", "")
+            tools.rename(f"{bgfxFile.parent}/{bgfxFile.name}", f"{bgfxFile.parent}/{strippedName}")
         tools.remove_files_by_mask(f"{self.package_folder}/lib", "*bx*")
+        tools.remove_files_by_mask(f"{self.package_folder}/lib", "*bimg*")
             
 
     def package_info(self):
         self.cpp_info.includedirs = ["include"]
-        self.cpp_info.libs = [f"bgfx{self.packageLibExt}"]
+        self.cpp_info.libs = ["bgfx"]
+        if self.settings.os == "Linux":
+            self.cpp_info.system_libs.extend(["X11", "GL"])
 
