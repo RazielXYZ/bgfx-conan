@@ -1,6 +1,8 @@
-from enum import auto
-from importlib.metadata import requires
 from conans import ConanFile, tools, MSBuild, AutoToolsBuildEnvironment
+from conan.tools.microsoft import is_msvc
+from conan.tools.build import check_min_cppstd
+from conan.tools.scm import Version
+from conan.errors import ConanInvalidConfiguration
 from pathlib import Path
 import os
 
@@ -18,7 +20,7 @@ class bgfxConan(ConanFile):
     options = {"shared": [True, False], "tools": [True, False]}
     default_options = {"shared": False, "tools": False}
 
-    requires = "bx/[>=1.18.0]", "bimg/[>=1.3.0]"
+    requires = "bx/[>=1.18.0]@bx/rolling", "bimg/[>=1.3.0]@bimg/rolling"
 
     invalidPackageExceptionText = "Less lib files found for copy than expected. Aborting."
     expectedNumLibs = 1
@@ -27,7 +29,8 @@ class bgfxConan(ConanFile):
     bgfxFolder = "bgfx"
     
 
-    vsVerToGenie = {"17": "2022", "16": "2019", "15": "2017"}
+    vsVerToGenie = {"17": "2022", "16": "2019", "15": "2017",
+                    "193": "2022", "192": "2019", "191": "2017"}
 
     gccOsToGenie = {"Windows": "--gcc=mingw-gcc", "Linux": "--gcc=linux-gcc", "Macos": "--gcc=osx", "Android": "--gcc=android", "iOS": "--gcc=ios"}
     gmakeOsToProj = {"Windows": "mingw", "Linux": "linux", "Macos": "osx", "Android": "android", "iOS": "ios"}
@@ -37,6 +40,16 @@ class bgfxConan(ConanFile):
     buildTypeToMakeConfig = {"Debug": "config=debug", "Release": "config=release"}
     archToMakeConfigSuffix = {"x86": "32", "x86_64": "64"}
     osToUseMakeConfigSuffix = {"Windows": True, "Linux": True, "Macos": False, "Android": False, "iOS": False}
+
+    def package_id(self):
+        if is_msvc(self):
+            del self.info.settings.compiler.cppstd
+
+    def validate(self):
+        if self.settings.compiler.get_safe("cppstd"):
+            check_min_cppstd(self, 14)
+        if Version(self.dependencies["bimg"].ref.version) < "1.3.30" and self.settings.os in ["Linux", "FreeBSD"] and self.settings.arch == "x86_64" and self.settings_build.arch == "x86":
+            raise ConanInvalidConfiguration("The depended on version of the bimg cannot be cross-built to Linux x86 due to old astc breaking that.")
 
     def configure(self):
         if self.settings.os == "Windows":
@@ -92,7 +105,7 @@ class bgfxConan(ConanFile):
     def build(self):
         # Map conan compilers to genie input
         genie = os.path.sep.join(["..", self.bxFolder, self.toolsFolder, "genie"])
-        if self.settings.compiler == "Visual Studio":
+        if is_msvc(self):
             # Use genie directly, then msbuild on specific projects based on requirements
             genieVS = f"vs{self.vsVerToGenie[str(self.settings.compiler.version)]}"
             genieGen = f"{self.genieExtra} {genieVS}"
@@ -154,6 +167,16 @@ class bgfxConan(ConanFile):
     def package_info(self):
         self.cpp_info.includedirs = ["include"]
         self.cpp_info.libs = ["bgfx"]
-        if self.settings.os == "Linux":
+
+        if self.settings.os in ["Linux", "FreeBSD"]:
             self.cpp_info.system_libs.extend(["X11", "GL"])
 
+        self.cpp_info.set_property("cmake_file_name", "bgfx")
+        self.cpp_info.set_property("cmake_target_name", "bgfx::bgfx")
+        self.cpp_info.set_property("pkg_config_name", "bgfx")
+
+        #  TODO: to remove in conan v2 once cmake_find_package_* generators removed
+        self.cpp_info.filenames["cmake_find_package"] = "bgfx"
+        self.cpp_info.filenames["cmake_find_package_multi"] = "bgfx"
+        self.cpp_info.names["cmake_find_package"] = "bgfx"
+        self.cpp_info.names["cmake_find_package_multi"] = "bgfx"
